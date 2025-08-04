@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Play Game</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0; height: 100vh; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+  </style>
+</head>
+<body>
+  <script src="https://cdn.jsdelivr.net/npm/idb@8/build/umd.js"></script>
+  <script>
+    // Register the service worker for /play/ scope if not already registered
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js', { scope: '/play/' })
+        .catch(e => console.warn('Service worker registration failed:', e));
+    }
+    // No other logic needed; this page just exists to help serve files via SW
+  </script>
+</body>
+</html>

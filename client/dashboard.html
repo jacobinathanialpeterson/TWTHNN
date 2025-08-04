@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/idb@8/build/umd.js"></script>
+</head>
+
+<body class="dashboard-page">
+  <header>
+    <h1>Welcome, <span id="username">...</span></h1>
+  </header>
+
+  <nav class="tabs">
+    <div class="tab active" data-tab="downloads">My Downloads</div>
+    <div class="tab" data-tab="explore">Explore Games</div>
+    <div class="tab" data-tab="admin">Admin</div>
+    <div class="tab" data-tab="account">Account</div>
+  </nav>
+
+  <main class="content" id="tab-content"></main>
+
+  <script>
+    // --- Globals ---
+    let currentUser = null, permissions = 0, tabData = {}, accountStatus = "Guest";
+    let localGameIds = new Set(), backendDownloads = new Set(), allGames = {};
+    let loadingGames = {}, downloadCounts = {};
+
+    // --- IndexedDB helpers ---
+    async function openGameFilesDB() {
+      const DB_NAME = 'GameFilesDB', DB_VERSION = 1;
+      try {
+        return await idb.openDB(DB_NAME, DB_VERSION, {
+          upgrade(db) {
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'path' });
+          }
+        });
+      } catch {
+        await indexedDB.deleteDatabase(DB_NAME);
+        return await idb.openDB(DB_NAME, DB_VERSION, {
+          upgrade(db) {
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'path' });
+          }
+        });
+      }
+    }
+
+    // --- Utility ---
+    function getActiveTab() {
+      return document.querySelector('.tab.active').getAttribute('data-tab');
+    }
+    async function fetchCurrentUser() {
+      try {
+        const res = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        return await res.json();
+      } catch {
+        return { success: false };
+      }
+    }
+    async function fetchAllGamesOnce() {
+      if (Object.keys(allGames).length === 0) {
+        try {
+          const res = await fetch('http://localhost:5000/api/games');
+          const result = await res.json();
+          allGames = result.success ? result.message : {};
+        } catch {
+          allGames = {};
+        }
+      }
+    }
+    async function fetchDownloadCounts() {
+      try {
+        const res = await fetch('http://localhost:5000/api/downloadCounts', { credentials: 'include' });
+        const result = await res.json();
+        downloadCounts = result.success ? result.counts : {};
+      } catch {
+        downloadCounts = {};
+      }
+    }
+    async function getLocalContentHash(gameId) {
+      try {
+        const db = await openGameFilesDB();
+        const meta = await db.get('files', `${gameId}/.meta.json`);
+        if (meta && meta.blob) {
+          const text = await meta.blob.text();
+          return JSON.parse(text).contentHash;
+        }
+      } catch {}
+      return null;
+    }
+
+    // --- Main ---
+    document.addEventListener('DOMContentLoaded', async () => {
+      currentUser = await fetchCurrentUser();
+      if (currentUser.success) {
+        document.getElementById('username').textContent = currentUser.message.displayName;
+        permissions = currentUser.message.permissions;
+      } else {
+        document.getElementById('username').textContent = "Guest";
+        permissions = 0;
+      }
+      if (permissions === 0) {
+        document.querySelector('.tab[data-tab="admin"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="downloads"]').style.display = 'none';
+        accountStatus = "Guest";
+      } else if (permissions === 1) {
+        document.querySelector('.tab[data-tab="admin"]').style.display = 'none';
+        accountStatus = "User";
+      } else if (permissions === 2) {
+        accountStatus = "Admin";
+      }
+      tabData = {
+        downloads: `
+          <h2>My Downloads</h2>
+          <input type="text" id="downloads-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="downloads-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="downloads-list"></div>
+        `,
+        explore: `
+          <h2>Explore Games</h2>
+          <input type="text" id="explore-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="explore-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="explore-downloads"></div>
+        `,
+        account: `
+          <h2>Account</h2>
+          <p>Username: <span id="account-username">${currentUser.message?.username || ""}</span></p>
+          <p>Display Name: <span id="account-display-name">${currentUser.message?.displayName || ""}</span></p>
+          <p>Email: <span id="account-email">${currentUser.message?.email || ""}</span></p>
+          <p>Account Status: <span id="account-permissions">${accountStatus}</span></p>
+          <button onclick="logout()" class='logout-btn'>Logout</button>
+        `,
+        admin: `
+          <h2>Admin Panel</h2>
+          <div class="user-requests">Loading user requests...</div>
+        `
+      };
+      await fetchAllGamesOnce();
+      await fetchDownloadCounts();
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', async () => {
+          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          const tabId = tab.getAttribute('data-tab');
+          if (tabId === 'downloads') await loadDownloadsTab();
+          else if (tabId === 'explore') await loadExploreTab();
+          else if (tabId === 'admin') await loadAdminTab();
+          document.getElementById('tab-content').innerHTML = tabData[tabId] || "<p>Unknown tab.</p>";
+        });
+      });
+      await loadExploreTab();
+      await loadDownloadsTab();
+      document.getElementById('tab-content').innerHTML = tabData.downloads;
+    });
+
+    // --- Tab Loaders ---
+    async function loadExploreTab() {
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readonly');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
+        const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        const userResult = await userRes.json();
+        backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
+        await fetchDownloadCounts();
+        tabData.explore = `
+          <h2>Explore Games</h2>
+          <input type="text" id="explore-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="explore-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="explore-downloads"></div>
+        `;
+        function renderExploreGames() {
+          const search = (document.getElementById('explore-search')?.value || '').toLowerCase();
+          const sortKey = document.getElementById('explore-sort')?.value || 'gameName';
+          let gamesArr = Object.entries(allGames);
+          if (search) {
+            gamesArr = gamesArr.filter(([id, game]) =>
+              (game.gameName || '').toLowerCase().includes(search) ||
+              (game.gameSystem || '').toLowerCase().includes(search) ||
+              id.toLowerCase().includes(search)
+            );
+          }
+          if (sortKey === 'gameName') {
+            gamesArr.sort((a, b) => (a[1].gameName || '').localeCompare(b[1].gameName || ''));
+          } else if (sortKey === 'gameNameReverse') {
+            gamesArr.sort((a, b) => (b[1].gameName || '').localeCompare(a[1].gameName || ''));
+          } else if (sortKey === 'downloads') {
+            gamesArr.sort((a, b) => (downloadCounts[b[0]] || 0) - (downloadCounts[a[0]] || 0));
+          } else if (sortKey === 'downloadsReverse') {
+            gamesArr.sort((a, b) => (downloadCounts[a[0]] || 0) - (downloadCounts[b[0]] || 0));
+          }
+          let html = '';
+          for (const [id, game] of gamesArr) {
+            html += renderGameCard(id, game, localGameIds, backendDownloads, false);
+          }
+          document.getElementById('explore-downloads').innerHTML = html || '<p>No games found.</p>';
+        }
+        setTimeout(() => {
+          document.getElementById('explore-search').addEventListener('input', renderExploreGames);
+          document.getElementById('explore-sort').addEventListener('change', renderExploreGames);
+          renderExploreGames();
+        }, 0);
+      } catch (err) {
+        tabData.explore = "<p>Error loading games.</p>";
+      }
+    }
+
+    async function loadDownloadsTab() {
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readonly');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
+        const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        const userResult = await userRes.json();
+        backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
+        await fetchDownloadCounts();
+        tabData.downloads = `
+          <h2>My Downloads</h2>
+          <input type="text" id="downloads-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="downloads-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="downloads-list"></div>
+        `;
+        function renderDownloadsGames() {
+          const search = (document.getElementById('downloads-search')?.value || '').toLowerCase();
+          const sortKey = document.getElementById('downloads-sort')?.value || 'gameName';
+          let gamesArr = Array.from(new Set([...localGameIds, ...backendDownloads]))
+            .map(id => [id, allGames[id]])
+            .filter(([id, game]) => !!game);
+          if (search) {
+            gamesArr = gamesArr.filter(([id, game]) =>
+              (game.gameName || '').toLowerCase().includes(search) ||
+              (game.gameSystem || '').toLowerCase().includes(search) ||
+              id.toLowerCase().includes(search)
+            );
+          }
+          if (sortKey === 'gameName') {
+            gamesArr.sort((a, b) => (a[1].gameName || '').localeCompare(b[1].gameName || ''));
+          } else if (sortKey === 'gameNameReverse') {
+            gamesArr.sort((a, b) => (b[1].gameName || '').localeCompare(a[1].gameName || ''));
+          } else if (sortKey === 'downloads') {
+            gamesArr.sort((a, b) => (downloadCounts[b[0]] || 0) - (downloadCounts[a[0]] || 0));
+          } else if (sortKey === 'downloadsReverse') {
+            gamesArr.sort((a, b) => (downloadCounts[a[0]] || 0) - (downloadCounts[b[0]] || 0));
+          }
+          let html = '';
+          for (const [id, game] of gamesArr) {
+            html += renderGameCard(id, game, localGameIds, backendDownloads, false);
+          }
+          document.getElementById('downloads-list').innerHTML = html || '<p>No games found.</p>';
+        }
+        setTimeout(() => {
+          document.getElementById('downloads-search').addEventListener('input', renderDownloadsGames);
+          document.getElementById('downloads-sort').addEventListener('change', renderDownloadsGames);
+          renderDownloadsGames();
+        }, 0);
+      } catch (err) {
+        tabData.downloads = "<p>Error loading downloads.</p>";
+      }
+    }
+
+    async function loadAdminTab() {
+      tabData.admin = `<h2>Admin Panel</h2><div class="user-requests">Loading user requests...</div>`;
+      try {
+        const res = await fetch('http://localhost:5000/admin/userRequests', { credentials: 'include' });
+        const result = await res.json();
+        if (result.success) {
+          if (result.message.length === 0) {
+            tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>No pending user requests.</p></div>`;
+          } else {
+            tabData.admin = `<h2>Admin Panel</h2>
+              <div class="user-requests">
+                <h3>Pending User Requests</h3>
+                <table class="user-requests-table">
+                  <thead>
+                    <tr>
+                      <th>Display Name</th>
+                      <th>Username</th>
+                      <th>Email</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${result.message.map(user => `
+                      <tr>
+                        <td>${user.displayName}</td>
+                        <td><code>${user.username}</code></td>
+                        <td>${user.email || ''}</td>
+                        <td>
+                          <button onclick="approveUser(${user.id}, this)">Approve</button>
+                          <button onclick="declineUser(${user.id}, this)" style="margin-left:8px;background:#c62828;">Decline</button>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>`;
+          }
+        } else {
+          tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>Error loading requests.</p></div>`;
+        }
+      } catch {
+        tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>Error loading requests.</p></div>`;
+      }
+    }
+
+    // --- Admin actions ---
+    async function approveUser(userId, btn) {
+      btn.disabled = true; btn.textContent = "Approving...";
+      try {
+        const res = await fetch('http://localhost:5000/admin/approveUser', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId })
+        });
+        const result = await res.json();
+        if (result.success) {
+          btn.textContent = "Approved!";
+          setTimeout(() => { loadAdminTab().then(() => {
+            if (getActiveTab() === 'admin') document.getElementById('tab-content').innerHTML = tabData.admin;
+          }); }, 800);
+        } else {
+          btn.textContent = "Failed";
+          alert(result.message || "Failed to approve user.");
+        }
+      } catch {
+        btn.textContent = "Failed";
+        alert("Network error.");
+      }
+    }
+    async function declineUser(userId, btn) {
+      btn.disabled = true; btn.textContent = "Declining...";
+      try {
+        const res = await fetch('http://localhost:5000/admin/declineUser', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId })
+        });
+        const result = await res.json();
+        if (result.success) {
+          btn.textContent = "Declined!";
+          setTimeout(() => { loadAdminTab().then(() => {
+            if (getActiveTab() === 'admin') document.getElementById('tab-content').innerHTML = tabData.admin;
+          }); }, 800);
+        } else {
+          btn.textContent = "Failed";
+          alert(result.message || "Failed to decline user.");
+        }
+      } catch {
+        btn.textContent = "Failed";
+        alert("Network error.");
+      }
+    }
+
+    // --- Game Card ---
+    function renderGameCard(id, game, localGameIds, backendDownloads, needsUpdate = false) {
+      let status = '', btns = '', loadingState = loadingGames[id];
+      if (loadingState === "downloading") {
+        status = `<span style="color:#1976d2;">Downloading <span class="loading-spinner"></span></span>`;
+      } else if (loadingState === "unzipping") {
+        status = `<span style="color:#1976d2;">Unzipping <span class="loading-spinner"></span></span>`;
+      } else if (loadingState === "removing") {
+        status = `<span style="color:orange;">Removing <span class="loading-spinner"></span></span>`;
+      } else if (needsUpdate) {
+        status = `<span style="color:red;">Newer version available!</span>`;
+        btns = `<button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>`;
+      } else if (localGameIds.has(id) && backendDownloads.has(id)) {
+        status = '<span style="color:green;">Downloaded</span>';
+        btns = `
+          <button onclick="launchGame('${id}')">Launch</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else if (backendDownloads.has(id) && !localGameIds.has(id)) {
+        status = '<span style="color:orange;">Download not found locally.</span>';
+        btns = `
+          <button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else if (localGameIds.has(id) && !backendDownloads.has(id)) {
+        status = '<span style="color:orange;">Not in your account downloads.</span>';
+        btns = `
+          <button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else {
+        btns = `<button id="download-btn-${id}" onclick="downloadGame('${id}')">Download</button>`;
+      }
+      return `
+        <div class="game-item" id="game-card-${id}">
+          <div class="game-name">${game?.gameName || id}</div>
+          <div class="game-system">System: ${game?.gameSystem || 'Unknown'}</div>
+          <div class="game-downloads-line">Downloads: ${downloadCounts[id] || 0}</div>
+          ${status}
+          ${btns}
+        </div>
+      `;
+    }
+
+    // --- Game Actions ---
+    async function downloadGame(gameId) {
+      loadingGames[gameId] = "downloading";
+      updateGameCard(gameId);
+      try {
+        const res = await fetch('http://localhost:5000/api/download', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gameId })
+        });
+        if (!res.ok) throw new Error("Download failed");
+        loadingGames[gameId] = "unzipping";
+        updateGameCard(gameId);
+        const blob = await res.blob();
+        const zip = await JSZip.loadAsync(blob);
+        const files = [];
+        for (const [path, file] of Object.entries(zip.files)) {
+          if (!file.dir) {
+            const content = await file.async('blob');
+            files.push({ path: `${gameId}/${path}`, blob: content });
+          }
+        }
+        const metaKey = `${gameId}/.meta.json`;
+        const meta = { contentHash: allGames[gameId]?.contentHash || null };
+        files.push({ path: metaKey, blob: new Blob([JSON.stringify(meta)], { type: 'application/json' }) });
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readwrite');
+        const store = tx.objectStore('files');
+        for (const file of files) store.put(file);
+        await tx.done;
+        localGameIds.add(gameId);
+        try {
+          const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+          const userResult = await userRes.json();
+          backendDownloads = userResult.success ? new Set(userResult.message.downloads) : backendDownloads;
+        } catch {
+          backendDownloads.add(gameId);
+        }
+        // --- Update download counts after successful download ---
+        await fetchDownloadCounts();
+        delete loadingGames[gameId];
+        updateGameCard(gameId);
+      } catch {
+        delete loadingGames[gameId];
+        updateGameCard(gameId);
+        alert('Failed to download game.');
+      }
+    }
+    function launchGame(gameId) {
+      // Pass gameId and gameName as query params
+      const gameName = encodeURIComponent(allGames[gameId]?.gameName || gameId);
+      window.location.href = `/play?gameId=${encodeURIComponent(gameId)}&title=${gameName}`;
+    }
+    async function removeDownload(gameId) {
+      loadingGames[gameId] = "removing";
+      updateGameCard(gameId);
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readwrite');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        for (const file of allFiles) {
+          if (file.path.startsWith(gameId + '/')) store.delete(file.path);
+        }
+        await tx.done;
+        localGameIds.delete(gameId);
+      } catch {}
+      try {
+        await fetch('http://localhost:5000/api/removeDownload', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gameId })
+        });
+        backendDownloads.delete(gameId);
+      } catch {}
+      delete loadingGames[gameId];
+      updateGameCard(gameId);
+    }
+    function updateGameCard(gameId) {
+      document.querySelectorAll('#tab-content .downloads #game-card-' + gameId).forEach(card => {
+        if (getActiveTab() === 'downloads') {
+          const inDownloads = localGameIds.has(gameId) || backendDownloads.has(gameId);
+          if (!inDownloads) card.remove();
+          else {
+            getLocalContentHash(gameId).then(localHash => {
+              const backendHash = allGames[gameId]?.contentHash;
+              const needsUpdate = localHash && backendHash && localHash !== backendHash;
+              card.outerHTML = renderGameCard(gameId, allGames[gameId], localGameIds, backendDownloads, needsUpdate);
+            });
+          }
+        } else if (getActiveTab() === 'explore') {
+          getLocalContentHash(gameId).then(localHash => {
+            const backendHash = allGames[gameId]?.contentHash;
+            const needsUpdate = localHash && backendHash && localHash !== backendHash;
+            card.outerHTML = renderGameCard(gameId, allGames[gameId], localGameIds, backendDownloads, needsUpdate);
+          });
+        }
+      });
+    }
+    function logout() {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (registrations) {
+          for (let registration of registrations) registration.unregister();
+        });
+      }
+      window.location.href = '/logout';
+    }
+  </script>
+</body>
+
+</html>
