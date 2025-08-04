@@ -2,9 +2,7 @@ import os, sys
 from pathlib import Path
 
 # 1) Point sys.path to your server/app.py folder:
-base = Path(__file__).parent
-sys.path.insert(0, str(base / 'server'))
-
+sys.path.append("home/cyranicusmcneff.helioho.st/httpdocs/server")
 # 2) Import and expose the Flask app as "application":
 from server.app import app as application
 
