@@ -1,5 +1,4 @@
 import os, sys
-from pathlib import Path
 
 # 1) Point sys.path to your server/app.py folder:
 sys.path.append("home/cyranicusmcneff.helioho.st/httpdocs/server")
