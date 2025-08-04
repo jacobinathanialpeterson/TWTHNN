@@ -5,6 +5,6 @@ RewriteBase /
 
 RewriteRule ^ - [L]
 
-RewriteRule ^flask\.wsgi(/.*)?$ - [L]
+RewriteRule ^(/.*)?$ - [L]
 
-RewriteRule ^(.*)$ flask.wsgi/$1 [QSA,PT,L]
+RewriteRule ^(.*)$ /$1 [QSA,PT,L]
