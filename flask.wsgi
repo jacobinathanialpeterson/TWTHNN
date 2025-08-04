@@ -1,10 +1,14 @@
 import os, sys
+from pathlib import Path
 
-# edit your path below
-sys.path.append("/home/cyranicusmcneff.helioho.st/httpdocs/server");
+# 1) Point sys.path to your server/app.py folder:
+base = Path(__file__).parent
+sys.path.insert(0, str(base / 'server'))
 
-sys.path.insert(0, os.path.dirname(__file__))
-from server.app import app as application
+# 2) Import and expose the Flask app as "application":
+from app import app as application
 
-# set this to something harder to guess
-application.secret_key = 'secret'
+# 3) Optional: force a fixed secret key (sessions, CSRF, etc.)
+application.secret_key = os.getenv('FLASK_SECRET', 'change_this_to_secure_value')
+
+# (You don’t need application_root since it's mounted at "/")
