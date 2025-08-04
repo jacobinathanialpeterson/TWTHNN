@@ -1,10 +1,7 @@
 Options +ExecCGI
-
 RewriteEngine On
 RewriteBase /
-
-RewriteRule ^ - [L]
-
-RewriteRule ^(/.*)?$ - [L]
-
-RewriteRule ^(.*)$ /$1 [QSA,PT,L]
+RewriteRule ^(media/.*)$ - [L]
+RewriteRule ^(admin_media/.*)$ - [L]
+RewriteRule ^(/.*)$ - [L]
+RewriteRule ^(.*)$ flask.wsgi/$1 [QSA,PT,L]
