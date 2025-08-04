@@ -25,6 +25,8 @@
   <main class="content" id="tab-content"></main>
 
   <script>
+    // Set your API base URL here:
+    const BASE_URL = "https://cyranicusmcneff.helioho.st";
     // --- Globals ---
     let currentUser = null, permissions = 0, tabData = {}, accountStatus = "Guest";
     let localGameIds = new Set(), backendDownloads = new Set(), allGames = {};
@@ -50,12 +52,9 @@
     }
 
     // --- Utility ---
-    function getActiveTab() {
-      return document.querySelector('.tab.active').getAttribute('data-tab');
-    }
     async function fetchCurrentUser() {
       try {
-        const res = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        const res = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
         return await res.json();
       } catch {
         return { success: false };
@@ -64,7 +63,7 @@
     async function fetchAllGamesOnce() {
       if (Object.keys(allGames).length === 0) {
         try {
-          const res = await fetch('http://localhost:5000/api/games');
+          const res = await fetch(`${BASE_URL}/api/games`);
           const result = await res.json();
           allGames = result.success ? result.message : {};
         } catch {
@@ -74,7 +73,7 @@
     }
     async function fetchDownloadCounts() {
       try {
-        const res = await fetch('http://localhost:5000/api/downloadCounts', { credentials: 'include' });
+        const res = await fetch(`${BASE_URL}/api/downloadCounts`, { credentials: 'include' });
         const result = await res.json();
         downloadCounts = result.success ? result.counts : {};
       } catch {
@@ -175,7 +174,7 @@
         const store = tx.objectStore('files');
         const allFiles = await store.getAll();
         localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
-        const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
         const userResult = await userRes.json();
         backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
         await fetchDownloadCounts();
@@ -233,7 +232,7 @@
         const store = tx.objectStore('files');
         const allFiles = await store.getAll();
         localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
-        const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+        const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
         const userResult = await userRes.json();
         backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
         await fetchDownloadCounts();
@@ -289,7 +288,7 @@
     async function loadAdminTab() {
       tabData.admin = `<h2>Admin Panel</h2><div class="user-requests">Loading user requests...</div>`;
       try {
-        const res = await fetch('http://localhost:5000/admin/userRequests', { credentials: 'include' });
+        const res = await fetch(`${BASE_URL}/admin/userRequests`, { credentials: 'include' });
         const result = await res.json();
         if (result.success) {
           if (result.message.length === 0) {
@@ -335,7 +334,7 @@
     async function approveUser(userId, btn) {
       btn.disabled = true; btn.textContent = "Approving...";
       try {
-        const res = await fetch('http://localhost:5000/admin/approveUser', {
+        const res = await fetch(`${BASE_URL}/admin/approveUser`, {
           method: 'POST', credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId })
@@ -358,7 +357,7 @@
     async function declineUser(userId, btn) {
       btn.disabled = true; btn.textContent = "Declining...";
       try {
-        const res = await fetch('http://localhost:5000/admin/declineUser', {
+        const res = await fetch(`${BASE_URL}/admin/declineUser`, {
           method: 'POST', credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId })
@@ -428,7 +427,7 @@
       loadingGames[gameId] = "downloading";
       updateGameCard(gameId);
       try {
-        const res = await fetch('http://localhost:5000/api/download', {
+        const res = await fetch(`${BASE_URL}/api/download`, {
           method: 'POST', credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ gameId })
@@ -455,7 +454,7 @@
         await tx.done;
         localGameIds.add(gameId);
         try {
-          const userRes = await fetch('http://localhost:5000/api/currentUser', { method: 'GET', credentials: 'include' });
+          const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
           const userResult = await userRes.json();
           backendDownloads = userResult.success ? new Set(userResult.message.downloads) : backendDownloads;
         } catch {
@@ -491,7 +490,7 @@
         localGameIds.delete(gameId);
       } catch {}
       try {
-        await fetch('http://localhost:5000/api/removeDownload', {
+        await fetch(`${BASE_URL}/api/removeDownload`, {
           method: 'POST', credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ gameId })
