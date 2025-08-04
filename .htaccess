@@ -1,11 +1,8 @@
 Options +ExecCGI
-AddHandler cgi-script .wsgi .py
 
 RewriteEngine On
 RewriteBase /
 
-RewriteCond %{REQUEST_FILENAME} -f [OR]
-RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
 RewriteRule ^flask\.wsgi(/.*)?$ - [L]
