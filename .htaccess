@@ -4,4 +4,4 @@ RewriteBase /
 RewriteRule ^(media/.*)$ - [L]
 RewriteRule ^(admin_media/.*)$ - [L]
 RewriteRule ^(flask\.wsgi/.*)$ - [L]
-RewriteRule ^(.*)$ /flask.wsgi/$1 [QSA,PT,L]
+RewriteRule ^(.*)$ /$1 [QSA,PT,L]
