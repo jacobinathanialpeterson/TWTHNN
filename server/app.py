@@ -131,7 +131,7 @@ def apiLogin():
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "Missing JSON data"}), 400
-    usernameOrEmail = data.get('usernameOrEmail')
+    usernameOrEmail = data.get('username')
     password = data.get('password')
     if not usernameOrEmail or not password:
         return jsonify({"success": False, "message": "Username/email and password required"}), 400
