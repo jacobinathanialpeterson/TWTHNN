@@ -16,8 +16,8 @@ from flask_cors import CORS
 
 # --- App Config ---
 app = Flask(__name__, template_folder='../client')
-# app.secret_key = 'yourSecretKey'
-# CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+app.secret_key = 'yourSecretKey'
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 application = app
 loginManager = LoginManager()
 loginManager.login_view = 'loginPage'
