@@ -20,6 +20,7 @@
     <div class="tab" data-tab="explore">Explore Games</div>
     <div class="tab" data-tab="admin">Admin</div>
     <div class="tab" data-tab="account">Account</div>
+    <div class="tab" data-tab="request">Request Games</div>
   </nav>
 
   <main class="content" id="tab-content"></main>
@@ -150,6 +151,18 @@
         admin: `
           <h2>Admin Panel</h2>
           <div class="user-requests">Loading user requests...</div>
+        `,
+        request: `
+          <h2>Request Games</h2>
+            <p style="text-align:center">If you'd like to request a game be added, please use the form below.</p>
+          <style>
+          </style>
+          <iframe scrolling="no"
+            src="https://docs.google.com/forms/d/e/1FAIpQLSc11bT-_hBjhpSqXuBx3jdNwgWRRWXxSu6yKz4w0EYAp8WlKg/viewform?embedded=true"
+            title="Request Games Form"
+            style="width:620px;height:1000px;background: #f9f9f9;border: none; display: block; margin: 20px auto; border-radius: 8px;"
+            allowfullscreen
+          ></iframe>
         `
       };
       await fetchAllGamesOnce();
