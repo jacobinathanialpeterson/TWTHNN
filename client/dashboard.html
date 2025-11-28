@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/idb@8/build/umd.js"></script>
+</head>
+
+<body class="dashboard-page">
+  <header>
+    <h1>Welcome, <span id="username">...</span></h1>
+  </header>
+
+  <nav class="tabs">
+    <div class="tab active" data-tab="downloads">My Downloads</div>
+    <div class="tab" data-tab="explore">Explore Games</div>
+    <div class="tab" data-tab="admin">Admin</div>
+    <div class="tab" data-tab="account">Account</div>
+    <div class="tab" data-tab="request">Request Games</div>
+  </nav>
+
+  <main class="content" id="tab-content"></main>
+
+  <div id="alertContainer" class="alert-container"></div>
+
+  <script>
+    // Set your API base URL here:
+    const BASE_URL = ".";
+    // --- Globals ---
+    let currentUser = null, permissions = 0, tabData = {}, accountStatus = "Guest";
+    let localGameIds = new Set(), backendDownloads = new Set(), allGames = {};
+    let loadingGames = {}, downloadCounts = {};
+
+    // --- Alert System ---
+    function showAlert(message, duration = 4000) {
+      const alertContainer = document.getElementById('alertContainer');
+      const alertId = `alert-${Date.now()}`;
+      const alertEl = document.createElement('div');
+      alertEl.id = alertId;
+      alertEl.className = 'alert-notification';
+      alertEl.innerHTML = `
+        <button class="alert-close" onclick="removeAlert('${alertId}')">&times;</button>
+        <div class="alert-message">${message}</div>
+        <div class="alert-bar"></div>
+      `;
+      alertContainer.appendChild(alertEl);
+      
+      // Animate the bar countdown
+      const bar = alertEl.querySelector('.alert-bar');
+      bar.style.animation = `slideOut ${duration}ms linear`;
+      
+      setTimeout(() => {
+        removeAlert(alertId);
+      }, duration);
+    }
+    
+    function removeAlert(alertId) {
+      const alertEl = document.getElementById(alertId);
+      if (alertEl) {
+        alertEl.style.animation = 'slideOutAlert 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards';
+        setTimeout(() => {
+          if (alertEl.parentNode) alertEl.remove();
+        }, 600);
+      }
+    }
+
+    // --- IndexedDB helpers ---
+    async function openGameFilesDB() {
+      const DB_NAME = 'GameFilesDB', DB_VERSION = 1;
+      try {
+        return await idb.openDB(DB_NAME, DB_VERSION, {
+          upgrade(db) {
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'path' });
+          }
+        });
+      } catch {
+        await indexedDB.deleteDatabase(DB_NAME);
+        return await idb.openDB(DB_NAME, DB_VERSION, {
+          upgrade(db) {
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files', { keyPath: 'path' });
+          }
+        });
+      }
+    }
+
+    // --- Utility ---
+    async function fetchCurrentUser() {
+      try {
+        const res = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
+        return await res.json();
+      } catch {
+        return { success: false };
+      }
+    }
+    async function fetchAllGamesOnce() {
+      if (Object.keys(allGames).length === 0) {
+        try {
+          const res = await fetch(`${BASE_URL}/api/games`);
+          const result = await res.json();
+          allGames = result.success ? result.message : {};
+        } catch {
+          allGames = {};
+        }
+      }
+    }
+    async function fetchDownloadCounts() {
+      try {
+        const res = await fetch(`${BASE_URL}/api/downloadCounts`, { credentials: 'include' });
+        const result = await res.json();
+        downloadCounts = result.success ? result.counts : {};
+      } catch {
+        downloadCounts = {};
+      }
+    }
+    async function getLocalContentHash(gameId) {
+      try {
+        const db = await openGameFilesDB();
+        const meta = await db.get('files', `${gameId}/.meta.json`);
+        if (meta && meta.blob) {
+          const text = await meta.blob.text();
+          return JSON.parse(text).contentHash;
+        }
+      } catch {}
+      return null;
+    }
+    function getActiveTab() {
+      return document.querySelector('.tabs .tab.active')?.dataset.tab || null;
+    }
+
+
+    // --- Main ---
+    document.addEventListener('DOMContentLoaded', async () => {
+      currentUser = await fetchCurrentUser();
+      if (currentUser.success) {
+        document.getElementById('username').textContent = currentUser.message.displayName;
+        permissions = currentUser.message.permissions;
+      } else {
+        document.getElementById('username').textContent = "Guest";
+        permissions = 0;
+      }
+      if (permissions === 0) {
+        document.querySelector('.tab[data-tab="admin"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="downloads"]').style.display = 'none';
+        accountStatus = "Guest";
+      } else if (permissions === 1) {
+        document.querySelector('.tab[data-tab="admin"]').style.display = 'none';
+        accountStatus = "User";
+      } else if (permissions === 2) {
+        accountStatus = "Admin";
+      }
+      tabData = {
+        downloads: `
+          <h2>My Downloads</h2>
+          <input type="text" id="downloads-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="downloads-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="downloads-list"></div>
+        `,
+        explore: `
+          <h2>Explore Games</h2>
+          <input type="text" id="explore-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="explore-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="explore-downloads"></div>
+        `,
+        account: `
+          <div class="profile-view">
+            <div class="profile-header">
+              <div class="profile-avatar-container">
+                <div class="profile-avatar-display" id="profile-avatar-display"></div>
+              </div>
+            </div>
+            <div class="profile-content">
+              <div class="profile-section">
+                <h3>Account Information</h3>
+                <div class="profile-field">
+                  <label>Username</label>
+                  <div class="profile-value-display" id="profile-username">${currentUser.message?.username || ""}</div>
+                </div>
+                <div class="profile-field">
+                  <label>Display Name</label>
+                  <div class="profile-value-display" id="profile-displayName">${currentUser.message?.displayName || ""}</div>
+                </div>
+                <div class="profile-field">
+                  <label>Email</label>
+                  <div class="profile-value-display" id="profile-email">${currentUser.message?.email || ""}</div>
+                </div>
+              </div>
+              <div class="profile-section">
+                <h3>Status</h3>
+                <div class="profile-field">
+                  <label>Account Status</label>
+                  <span class="badge" id="profile-status">${accountStatus}</span>
+                </div>
+              </div>
+              <div class="profile-actions">
+                <button onclick="profileEditMode(true)" class="dashboard-btn">Edit Profile</button>
+                <button onclick="logout()" class="logout-btn">Logout</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="profileEditContainer" class="profile-edit hidden">
+            <div class="profile-edit-overlay" onclick="profileEditMode(false)"></div>
+            <div class="profile-edit-panel">
+              <div class="profile-edit-header">
+                <h2>Edit Profile</h2>
+                <button class="edit-close" onclick="profileEditMode(false)" aria-label="Close">×</button>
+              </div>
+              <div class="profile-edit-content">
+                <div class="profile-edit-avatar">
+                  <div class="avatar-display-large" id="edit-avatar-display"></div>
+                  <div class="avatar-controls">
+                    <button class="avatar-btn" onclick="showAvatarCustomizer()">Customize Avatar</button>
+                  </div>
+                </div>
+
+                <div class="profile-edit-fields">
+                  <label class="edit-field">
+                    <span>Display Name</span>
+                    <input id="edit-displayName" type="text" value="${currentUser.message?.displayName || ""}" />
+                  </label>
+                  <label class="edit-field">
+                    <span>Email</span>
+                    <input id="edit-email" type="email" value="${currentUser.message?.email || ""}" />
+                  </label>
+                  <label class="edit-field">
+                    <span>New Password (optional)</span>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                      <input id="edit-password" type="password" placeholder="Leave blank to keep current" style="flex:1;" />
+                      <button type="button" class="avatar-btn" onclick="togglePasswordVisibility()" style="padding:8px 12px;">👁</button>
+                    </div>
+                  </label>
+                  <label class="edit-field">
+                    <span>Confirm Password</span>
+                    <input id="edit-password-confirm" type="password" placeholder="Confirm new password" />
+                  </label>
+                </div>
+
+                <div class="profile-edit-actions">
+                  <button onclick="profileEditMode(false)" class="btn-cancel">Cancel</button>
+                  <button onclick="saveProfileChanges()" class="btn-save">Save Changes</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="avatarCustomizerContainer" class="avatar-customizer hidden">
+            <div class="customizer-overlay" onclick="showAvatarCustomizer(false)"></div>
+            <div class="customizer-panel">
+              <div class="customizer-header">
+                <h3>Customize Avatar</h3>
+                <button class="customizer-close" onclick="showAvatarCustomizer(false)">×</button>
+              </div>
+              <div class="customizer-content customizer-horizontal">
+                <div class="customizer-preview">
+                  <div id="customizer-avatar" class="avatar-preview-large"></div>
+                </div>
+                <div class="customizer-controls">
+                  <label class="control-group">
+                    <span>Avatar Type</span>
+                    <select id="customizer-mode" onchange="updateCustomizerPreview()">
+                      <option value="text">Text & Color</option>
+                      <option value="image">Photo</option>
+                    </select>
+                  </label>
+                  <label class="control-group" id="letters-control">
+                    <span>Letters</span>
+                    <input id="customizer-letters" type="text" maxlength="2" placeholder="AB" oninput="updateCustomizerPreview()" />
+                  </label>
+                  <label class="control-group" id="color-control">
+                    <span>Color</span>
+                    <input id="customizer-color" type="color" oninput="updateCustomizerPreview()" />
+                  </label>
+                  <div class="control-group" id="photo-control" style="display:none;">
+                    <button class="avatar-btn" onclick="document.getElementById('avatarUploadForCustomizer').click()">Upload Photo</button>
+                    <input id="avatarUploadForCustomizer" type="file" accept="image/*" style="display:none" onchange="startImageCrop(event)">
+                  </div>
+                </div>
+              </div>
+              <div class="customizer-actions">
+                <button onclick="showAvatarCustomizer(false)" class="btn-cancel">Cancel</button>
+                <button onclick="applyAvatarCustomization()" class="btn-save">Apply</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="imageCropperContainer" class="image-cropper hidden">
+            <div class="cropper-overlay" onclick="cancelImageCrop()"></div>
+            <div class="cropper-panel">
+              <div class="cropper-header">
+                <h3>Crop Image</h3>
+                <button class="cropper-close" onclick="cancelImageCrop()">×</button>
+              </div>
+              <div class="cropper-content cropper-horizontal">
+                <div class="cropper-canvas-wrapper">
+                  <canvas id="cropCanvas" class="crop-canvas"></canvas>
+                </div>
+                <div class="cropper-controls-right">
+                  <div class="cropper-preview">
+                    <div class="preview-label">Preview:</div>
+                    <div id="cropPreview" class="crop-preview-box"></div>
+                  </div>
+                  <label class="crop-control">
+                    <span>Zoom:</span>
+                    <div class="zoom-slider-wrapper">
+                      <input id="zoomSlider" type="range" min="0.25" max="3" step="0.05" value="1" oninput="updateCropPreview()" class="zoom-slider">
+                      <span class="zoom-value" id="zoomValue">1.0x</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              <div class="cropper-actions">
+                <button onclick="cancelImageCrop()" class="btn-cancel">Cancel</button>
+                <button onclick="applyCrop()" class="btn-save">Apply Crop</button>
+              </div>
+            </div>
+          </div>
+        `,
+        admin: `
+          <h2>Admin Panel</h2>
+          <div class="user-requests">Loading user requests...</div>
+        `,
+        request: `
+          <h2>Request Games</h2>
+            <p style="text-align:center">If you'd like to request a game be added, please use the form below.</p>
+          <iframe
+            src="https://docs.google.com/forms/d/e/1FAIpQLSc11bT-_hBjhpSqXuBx3jdNwgWRRWXxSu6yKz4w0EYAp8WlKg/viewform?embedded=true"
+            title="Request Games Form"
+            style="width:640px;height:800px;background: #f9f9f9;border: none; display: block; margin: 20px auto; border-radius: 8px;"
+            allowfullscreen
+          ></iframe>
+        `
+      };
+      await fetchAllGamesOnce();
+      await fetchDownloadCounts();
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', async () => {
+          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          const tabId = tab.getAttribute('data-tab');
+          if (tabId === 'downloads') await loadDownloadsTab();
+          else if (tabId === 'explore') await loadExploreTab();
+          else if (tabId === 'admin') await loadAdminTab();
+          document.getElementById('tab-content').innerHTML = tabData[tabId] || "<p>Unknown tab.</p>";
+          // If account tab is clicked, update the avatar display
+          if (tabId === 'account') {
+            setTimeout(() => updateProfileDisplay(), 0);
+          }
+        });
+      });
+      await loadExploreTab();
+      if (accountStatus === "Guest") {
+        document.getElementById('tab-content').innerHTML = tabData.explore;
+      } else {
+        await loadDownloadsTab();
+        document.getElementById('tab-content').innerHTML = tabData.downloads;
+      }
+      // Initialize profile display
+      updateProfileDisplay();
+    });
+
+    // --- Profile Functions ---
+    function getAvatarSettings() {
+      const user = currentUser?.message;
+      const avatar = user?.avatar;
+      // Handle consolidated avatar format { data, settings }
+      let data = null, settings = {};
+      if (avatar && typeof avatar === 'object' && !avatar.startsWith) {
+        // Consolidated format
+        data = avatar.data || null;
+        settings = avatar.settings || {};
+      } else if (typeof avatar === 'string') {
+        // Legacy format: avatar is just the data URI
+        data = avatar;
+        settings = user?.avatarSettings || {};
+      }
+      // Prefer showing the stored image if it exists, otherwise honor the useImage flag
+      const useImage = !!data || settings.useImage === true;
+      return {
+        useImage: useImage,
+        avatar: data || null,
+        letters: settings.letters || (user?.displayName ? user.displayName.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase() : 'AB'),
+        color: settings.color || '#1793d1'
+      };
+    }
+    function renderAvatar(settings, size = 'small') {
+      const cls = size === 'small' ? 'profile-avatar' : 'avatar-large';
+      if (settings.useImage && settings.avatar) {
+        return `<img class="${cls}" src="${settings.avatar}" alt="avatar" />`;
+      }
+      return `<div class="${cls}" style="background:${settings.color};display:flex;align-items:center;justify-content:center;font-weight:700;color:white;font-size:${size==='small'?'18px':'32px'};">${settings.letters}</div>`;
+    }
+    function updateProfileDisplay() {
+      const settings = getAvatarSettings();
+      const user = currentUser?.message;
+      if (document.getElementById('profile-avatar-display')) {
+        document.getElementById('profile-avatar-display').innerHTML = renderAvatar(settings, 'large');
+      }
+      if (document.getElementById('edit-avatar-display')) {
+        document.getElementById('edit-avatar-display').innerHTML = renderAvatar(settings, 'large');
+      }
+      if (document.getElementById('customizer-avatar')) {
+        document.getElementById('customizer-avatar').innerHTML = renderAvatar(settings, 'large');
+      }
+      if (document.getElementById('profile-username')) document.getElementById('profile-username').textContent = user?.username || '';
+      if (document.getElementById('profile-displayName')) document.getElementById('profile-displayName').textContent = user?.displayName || '';
+      if (document.getElementById('profile-email')) document.getElementById('profile-email').textContent = user?.email || '';
+      if (document.getElementById('profile-status')) document.getElementById('profile-status').textContent = accountStatus;
+    }
+    function profileEditMode(open) {
+      const container = document.getElementById('profileEditContainer');
+      const settings = getAvatarSettings();
+      if (open) {
+        document.getElementById('edit-displayName').value = currentUser?.message?.displayName || '';
+        document.getElementById('edit-email').value = currentUser?.message?.email || '';
+        document.getElementById('edit-password').value = '';
+        document.getElementById('edit-password-confirm').value = '';
+        document.getElementById('edit-avatar-display').innerHTML = renderAvatar(settings, 'large');
+        document.getElementById('customizer-avatar').innerHTML = renderAvatar(settings, 'large');
+        document.getElementById('customizer-letters').value = settings.letters || '';
+        document.getElementById('customizer-color').value = settings.color || '#1793d1';
+        document.getElementById('customizer-mode').value = settings.useImage ? 'image' : 'text';
+        if (settings.useImage) {
+          document.getElementById('letters-control').style.display = 'none';
+          document.getElementById('color-control').style.display = 'none';
+          window.currentAvatarDataUri = settings.avatar;
+        } else {
+          document.getElementById('letters-control').style.display = 'flex';
+          document.getElementById('color-control').style.display = 'flex';
+          window.currentAvatarDataUri = null;
+        }
+        // Ensure customizer preview and controls reflect the current mode
+        try { updateCustomizerPreview(); } catch (e) { /* ignore */ }
+        container.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+      } else {
+        container.classList.add('hidden');
+        document.body.style.overflow = '';
+        window.currentAvatarDataUri = null;
+        window.currentAvatarSettings = null;
+      }
+    }
+    function handleAvatarUpload(event) {
+      const file = event.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUri = e.target.result;
+          window.currentAvatarDataUri = dataUri;
+          document.getElementById('edit-avatar-display').innerHTML = `<img class="avatar-large" src="${dataUri}" alt="uploaded" />`;
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+    function startImageCrop(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          window.cropImage = img;
+          const canvas = document.getElementById('cropCanvas');
+          const container = canvas.parentElement;
+          // Use a square canvas area for cropper (max 400px)
+          const maxSize = 400;
+          const size = Math.min(maxSize, Math.max(200, Math.min(img.width, img.height)));
+          canvas.width = size;
+          canvas.height = size;
+          // initialize pan/zoom state
+          window.cropPan = { x: 0, y: 0 };
+          window.cropStart = null;
+          window.cropDragging = false;
+          document.getElementById('zoomSlider').value = 1;
+          // attach pointer handlers for dragging
+          const ctx = canvas.getContext('2d');
+          // remove previous handlers if present
+          if (window.cropHandlers) {
+            try {
+              canvas.removeEventListener('pointerdown', window.cropHandlers.down);
+              canvas.removeEventListener('pointermove', window.cropHandlers.move);
+              canvas.removeEventListener('pointerup', window.cropHandlers.up);
+              canvas.removeEventListener('pointercancel', window.cropHandlers.up);
+              canvas.removeEventListener('pointerleave', window.cropHandlers.up);
+            } catch (e) {}
+          }
+          const onDown = (ev) => {
+            ev.preventDefault();
+            canvas.setPointerCapture(ev.pointerId);
+            window.cropDragging = true;
+            window.cropStart = { x: ev.clientX, y: ev.clientY, panX: window.cropPan.x, panY: window.cropPan.y };
+          };
+          const onMove = (ev) => {
+            if (!window.cropDragging || !window.cropStart) return;
+            const dx = ev.clientX - window.cropStart.x;
+            const dy = ev.clientY - window.cropStart.y;
+            window.cropPan.x = window.cropStart.panX + dx;
+            window.cropPan.y = window.cropStart.panY + dy;
+            updateCropPreview();
+          };
+          const onUp = (ev) => {
+            if (window.cropDragging) {
+              try { canvas.releasePointerCapture(ev.pointerId); } catch(e){}
+            }
+            window.cropDragging = false;
+            window.cropStart = null;
+            updateCropPreview();
+          };
+          canvas.addEventListener('pointerdown', onDown);
+          canvas.addEventListener('pointermove', onMove);
+          canvas.addEventListener('pointerup', onUp);
+          canvas.addEventListener('pointercancel', onUp);
+          canvas.addEventListener('pointerleave', onUp);
+          window.cropHandlers = { down: onDown, move: onMove, up: onUp };
+          updateCropPreview();
+          const cropper = document.getElementById('imageCropperContainer');
+          cropper.classList.remove('hidden');
+          document.body.style.overflow = 'hidden';
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+    function updateCropPreview() {
+      if (!window.cropImage) return;
+      const canvas = document.getElementById('cropCanvas');
+      const ctx = canvas.getContext('2d');
+      const zoom = parseFloat(document.getElementById('zoomSlider').value);
+      // Update zoom display
+      const zoomValueEl = document.getElementById('zoomValue');
+      if (zoomValueEl) zoomValueEl.textContent = zoom.toFixed(2) + 'x';
+      const img = window.cropImage;
+      const scaledWidth = img.width * zoom;
+      const scaledHeight = img.height * zoom;
+      // center offsets
+      const baseOffsetX = (canvas.width - scaledWidth) / 2;
+      const baseOffsetY = (canvas.height - scaledHeight) / 2;
+      // apply pan offsets (dragging)
+      window.cropPan = window.cropPan || { x: 0, y: 0 };
+      let drawX = baseOffsetX + window.cropPan.x;
+      let drawY = baseOffsetY + window.cropPan.y;
+      // clamp pan so image still covers the canvas (no empty edges)
+      if (scaledWidth > canvas.width) {
+        const minX = canvas.width - scaledWidth;
+        const maxX = 0;
+        drawX = Math.max(minX, Math.min(maxX, drawX));
+        window.cropPan.x = drawX - baseOffsetX;
+      } else {
+        // center if image smaller than canvas
+        drawX = baseOffsetX;
+        window.cropPan.x = 0;
+      }
+      if (scaledHeight > canvas.height) {
+        const minY = canvas.height - scaledHeight;
+        const maxY = 0;
+        drawY = Math.max(minY, Math.min(maxY, drawY));
+        window.cropPan.y = drawY - baseOffsetY;
+      } else {
+        drawY = baseOffsetY;
+        window.cropPan.y = 0;
+      }
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, drawX, drawY, scaledWidth, scaledHeight);
+      // Draw circular crop guide
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 2;
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const radius = Math.min(canvas.width, canvas.height) / 2 - 5;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      // Update preview (100x100 circular)
+      const previewCanvas = document.createElement('canvas');
+      previewCanvas.width = 100;
+      previewCanvas.height = 100;
+      const pCtx = previewCanvas.getContext('2d');
+      pCtx.fillStyle = '#000';
+      pCtx.fillRect(0, 0, 100, 100);
+      const previewRadius = 45;
+      pCtx.save();
+      pCtx.beginPath();
+      pCtx.arc(50, 50, previewRadius, 0, Math.PI * 2);
+      pCtx.clip();
+      // compute scale between canvas drawing and preview
+      const scale = 100 / canvas.width;
+      pCtx.drawImage(img, drawX * scale, drawY * scale, scaledWidth * scale, scaledHeight * scale);
+      pCtx.restore();
+      document.getElementById('cropPreview').innerHTML = `<img src="${previewCanvas.toDataURL()}" style="width:100%; height:100%; border-radius:50%; object-fit:cover;" />`;
+    }
+    function applyCrop() {
+      if (!window.cropImage) return;
+      const canvas = document.getElementById('cropCanvas');
+      const outputCanvas = document.createElement('canvas');
+      const size = 200;
+      outputCanvas.width = size;
+      outputCanvas.height = size;
+      const ctx = outputCanvas.getContext('2d');
+      // clip to a circle and draw the currently visible canvas area scaled to output
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+      ctx.clip();
+      const img = window.cropImage;
+      const zoom = parseFloat(document.getElementById('zoomSlider').value);
+      const scaledWidth = img.width * zoom;
+      const scaledHeight = img.height * zoom;
+      const baseOffsetX = (canvas.width - scaledWidth) / 2;
+      const baseOffsetY = (canvas.height - scaledHeight) / 2;
+      const drawX = baseOffsetX + (window.cropPan ? window.cropPan.x : 0);
+      const drawY = baseOffsetY + (window.cropPan ? window.cropPan.y : 0);
+      const scaleToOutput = size / canvas.width;
+      ctx.drawImage(img, drawX * scaleToOutput, drawY * scaleToOutput, scaledWidth * scaleToOutput, scaledHeight * scaleToOutput);
+      const dataUri = outputCanvas.toDataURL('image/png');
+      window.currentAvatarDataUri = dataUri;
+      document.getElementById('edit-avatar-display').innerHTML = `<img class="avatar-large" src="${dataUri}" alt="cropped" />`;
+      // If customizer is open, also update its preview and set mode to image
+      if (document.getElementById('avatarCustomizerContainer') && !document.getElementById('avatarCustomizerContainer').classList.contains('hidden')) {
+        window.currentAvatarSettings = { useImage: true, letters: '', color: '' };
+        window.currentAvatarDataUri = dataUri;
+        const modeEl = document.getElementById('customizer-mode');
+        if (modeEl) modeEl.value = 'image';
+        const customizerAvatar = document.getElementById('customizer-avatar');
+        if (customizerAvatar) customizerAvatar.innerHTML = renderAvatar({ useImage: true, avatar: dataUri }, 'large');
+        const lettersControl = document.getElementById('letters-control');
+        const colorControl = document.getElementById('color-control');
+        const photoControl = document.getElementById('photo-control');
+        if (lettersControl) lettersControl.style.display = 'none';
+        if (colorControl) colorControl.style.display = 'none';
+        if (photoControl) photoControl.style.display = 'block';
+      }
+      cancelImageCrop();
+    }
+    function cancelImageCrop() {
+      const cropper = document.getElementById('imageCropperContainer');
+      cropper.classList.add('hidden');
+      document.body.style.overflow = '';
+      // remove pointer handlers if attached
+      try {
+        const canvas = document.getElementById('cropCanvas');
+        if (window.cropHandlers && canvas) {
+          canvas.removeEventListener('pointerdown', window.cropHandlers.down);
+          canvas.removeEventListener('pointermove', window.cropHandlers.move);
+          canvas.removeEventListener('pointerup', window.cropHandlers.up);
+          canvas.removeEventListener('pointercancel', window.cropHandlers.up);
+          canvas.removeEventListener('pointerleave', window.cropHandlers.up);
+        }
+      } catch (e) {}
+      window.cropImage = null;
+      window.cropHandlers = null;
+      window.cropPan = null;
+    }
+    function showAvatarCustomizer(open) {
+      const container = document.getElementById('avatarCustomizerContainer');
+      if (open === true) {
+        container.classList.remove('hidden');
+      } else if (open === false) {
+        container.classList.add('hidden');
+      } else {
+        container.classList.toggle('hidden');
+      }
+    }
+    function updateCustomizerPreview() {
+      const mode = document.getElementById('customizer-mode').value;
+      const letters = document.getElementById('customizer-letters').value.toUpperCase().slice(0,2) || 'AB';
+      const color = document.getElementById('customizer-color').value;
+      if (mode === 'text') {
+        document.getElementById('letters-control').style.display = 'flex';
+        document.getElementById('color-control').style.display = 'flex';
+        document.getElementById('photo-control').style.display = 'none';
+        const settings = { useImage: false, letters, color, avatar: null };
+        document.getElementById('customizer-avatar').innerHTML = renderAvatar(settings, 'large');
+      } else {
+        document.getElementById('letters-control').style.display = 'none';
+        document.getElementById('color-control').style.display = 'none';
+        document.getElementById('photo-control').style.display = 'block';
+        if (window.currentAvatarDataUri) {
+          const settings = { useImage: true, avatar: window.currentAvatarDataUri, letters: '', color: '' };
+          document.getElementById('customizer-avatar').innerHTML = renderAvatar(settings, 'large');
+        }
+      }
+    }
+    function applyAvatarCustomization() {
+      const mode = document.getElementById('customizer-mode').value;
+      const letters = document.getElementById('customizer-letters').value.toUpperCase().slice(0,2) || 'AB';
+      const color = document.getElementById('customizer-color').value;
+      if (mode === 'text') {
+        window.currentAvatarSettings = { useImage: false, letters, color };
+        const settings = { useImage: false, letters, color, avatar: null };
+        document.getElementById('edit-avatar-display').innerHTML = renderAvatar(settings, 'large');
+        window.currentAvatarDataUri = null;
+      } else if (mode === 'image' && window.currentAvatarDataUri) {
+        window.currentAvatarSettings = { useImage: true, letters: '', color: '' };
+        const settings = { useImage: true, avatar: window.currentAvatarDataUri, letters: '', color: '' };
+        document.getElementById('edit-avatar-display').innerHTML = renderAvatar(settings, 'large');
+      }
+      showAvatarCustomizer(false);
+    }
+    function togglePasswordVisibility() {
+      const pwField = document.getElementById('edit-password');
+      const pwConfirmField = document.getElementById('edit-password-confirm');
+      const isPassword = pwField.type === 'password';
+      pwField.type = isPassword ? 'text' : 'password';
+      pwConfirmField.type = isPassword ? 'text' : 'password';
+    }
+    async function saveProfileChanges() {
+      const displayName = document.getElementById('edit-displayName').value.trim();
+      const email = document.getElementById('edit-email').value.trim();
+      const password = document.getElementById('edit-password').value;
+      const passwordConfirm = document.getElementById('edit-password-confirm').value;
+      // Validate password match if password is provided
+      if (password && password !== passwordConfirm) {
+        alert('Passwords do not match');
+        return;
+      }
+      // Store avatar as single object with settings embedded
+      const avatarObj = window.currentAvatarDataUri || window.currentAvatarSettings ? {
+        data: window.currentAvatarDataUri || null,
+        settings: window.currentAvatarSettings || null
+      } : null;
+      try {
+        const res = await fetch(`${BASE_URL}/api/updateProfile`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ displayName, email, password: password || null, avatar: avatarObj })
+        });
+        const result = await res.json();
+        if (result.success) {
+          currentUser = await fetchCurrentUser();
+          updateProfileDisplay();
+          profileEditMode(false);
+          window.currentAvatarDataUri = null;
+          window.currentAvatarSettings = null;
+          showAlert('Profile updated successfully!');
+        } else {
+          showAlert(`${result.message || 'Failed to update profile'}`);
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Network error');
+      }
+    }
+
+    // --- Tab Loaders ---
+    async function loadExploreTab() {
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readonly');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
+        const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
+        const userResult = await userRes.json();
+        backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
+        await fetchDownloadCounts();
+        tabData.explore = `
+          <h2>Explore Games</h2>
+          <input type="text" id="explore-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="explore-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="explore-downloads"></div>
+        `;
+        function renderExploreGames() {
+          const search = (document.getElementById('explore-search')?.value || '').toLowerCase();
+          const sortKey = document.getElementById('explore-sort')?.value || 'gameName';
+          let gamesArr = Object.entries(allGames);
+          if (search) {
+            gamesArr = gamesArr.filter(([id, game]) =>
+              (game.gameName || '').toLowerCase().includes(search) ||
+              (game.gameSystem || '').toLowerCase().includes(search) ||
+              id.toLowerCase().includes(search)
+            );
+          }
+          if (sortKey === 'gameName') {
+            gamesArr.sort((a, b) => (a[1].gameName || '').localeCompare(b[1].gameName || ''));
+          } else if (sortKey === 'gameNameReverse') {
+            gamesArr.sort((a, b) => (b[1].gameName || '').localeCompare(a[1].gameName || ''));
+          } else if (sortKey === 'downloads') {
+            gamesArr.sort((a, b) => (downloadCounts[b[0]] || 0) - (downloadCounts[a[0]] || 0));
+          } else if (sortKey === 'downloadsReverse') {
+            gamesArr.sort((a, b) => (downloadCounts[a[0]] || 0) - (downloadCounts[b[0]] || 0));
+          }
+          let html = '';
+          for (const [id, game] of gamesArr) {
+            html += renderGameCard(id, game, localGameIds, backendDownloads, false);
+          }
+          document.getElementById('explore-downloads').innerHTML = html || '<p>No games found.</p>';
+        }
+        setTimeout(() => {
+          document.getElementById('explore-search').addEventListener('input', renderExploreGames);
+          document.getElementById('explore-sort').addEventListener('change', renderExploreGames);
+          renderExploreGames();
+        }, 0);
+      } catch (err) {
+        tabData.explore = "<p>Error loading games.</p>";
+      }
+    }
+
+    async function loadDownloadsTab() {
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readonly');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        localGameIds = new Set(allFiles.map(file => file.path.split('/')[0]));
+        const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
+        const userResult = await userRes.json();
+        backendDownloads = userResult.success ? new Set(userResult.message.downloads) : new Set();
+        await fetchDownloadCounts();
+        tabData.downloads = `
+          <h2>My Downloads</h2>
+          <input type="text" id="downloads-search" placeholder="Search games..." style="margin-bottom:10px;width:60%;padding:6px;">
+          <select id="downloads-sort" style="margin-left:10px;padding:6px;">
+            <option value="gameName">Sort by Name (A-Z)</option>
+            <option value="gameNameReverse">Sort by Name (Z-A)</option>
+            <option value="downloads">Sort by Downloads (Most)</option>
+            <option value="downloadsReverse">Sort by Downloads (Least)</option>
+          </select>
+          <div class="downloads" id="downloads-list"></div>
+        `;
+        function renderDownloadsGames() {
+          const search = (document.getElementById('downloads-search')?.value || '').toLowerCase();
+          const sortKey = document.getElementById('downloads-sort')?.value || 'gameName';
+          // Include games that are in downloads, being downloaded/unzipped, or locally stored
+          let gamesArr = Array.from(new Set([...localGameIds, ...backendDownloads, ...Object.keys(loadingGames)]))
+            .map(id => [id, allGames[id]])
+            .filter(([id, game]) => !!game);
+          if (search) {
+            gamesArr = gamesArr.filter(([id, game]) =>
+              (game.gameName || '').toLowerCase().includes(search) ||
+              (game.gameSystem || '').toLowerCase().includes(search) ||
+              id.toLowerCase().includes(search)
+            );
+          }
+          if (sortKey === 'gameName') {
+            gamesArr.sort((a, b) => (a[1].gameName || '').localeCompare(b[1].gameName || ''));
+          } else if (sortKey === 'gameNameReverse') {
+            gamesArr.sort((a, b) => (b[1].gameName || '').localeCompare(a[1].gameName || ''));
+          } else if (sortKey === 'downloads') {
+            gamesArr.sort((a, b) => (downloadCounts[b[0]] || 0) - (downloadCounts[a[0]] || 0));
+          } else if (sortKey === 'downloadsReverse') {
+            gamesArr.sort((a, b) => (downloadCounts[a[0]] || 0) - (downloadCounts[b[0]] || 0));
+          }
+          let html = '';
+          for (const [id, game] of gamesArr) {
+            html += renderGameCard(id, game, localGameIds, backendDownloads, false);
+          }
+          document.getElementById('downloads-list').innerHTML = html || '<p>No games found.</p>';
+        }
+        setTimeout(() => {
+          document.getElementById('downloads-search').addEventListener('input', renderDownloadsGames);
+          document.getElementById('downloads-sort').addEventListener('change', renderDownloadsGames);
+          renderDownloadsGames();
+        }, 0);
+      } catch (err) {
+        tabData.downloads = "<p>Error loading downloads.</p>";
+      }
+    }
+
+    async function loadAdminTab() {
+      tabData.admin = `<h2>Admin Panel</h2><div class="user-requests">Loading user requests...</div>`;
+      try {
+        const res = await fetch(`${BASE_URL}/admin/userRequests`, { credentials: 'include' });
+        const result = await res.json();
+        if (result.success) {
+          if (result.message.length === 0) {
+            tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>No pending user requests.</p></div>`;
+          } else {
+            tabData.admin = `<h2>Admin Panel</h2>
+              <div class="user-requests">
+                <h3>Pending User Requests</h3>
+                <table class="user-requests-table">
+                  <thead>
+                    <tr>
+                      <th>Display Name</th>
+                      <th>Username</th>
+                      <th>Email</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${result.message.map(user => `
+                      <tr>
+                        <td>${user.displayName}</td>
+                        <td><code>${user.username}</code></td>
+                        <td>${user.email || ''}</td>
+                        <td>
+                          <button onclick="approveUser(${user.id}, this)">Approve</button>
+                          <button onclick="declineUser(${user.id}, this)" style="margin-left:8px;background:#c62828;">Decline</button>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>`;
+          }
+        } else {
+          tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>Error loading requests.</p></div>`;
+        }
+      } catch {
+        tabData.admin = `<h2>Admin Panel</h2><div class="user-requests"><p>Error loading requests.</p></div>`;
+      }
+    }
+
+    // --- Admin actions ---
+    async function approveUser(userId, btn) {
+      btn.disabled = true; btn.textContent = "Approving...";
+      try {
+        const res = await fetch(`${BASE_URL}/admin/approveUser`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId })
+        });
+        const result = await res.json();
+        if (result.success) {
+          btn.textContent = "Approved!";
+          showAlert('User approved successfully!');
+          setTimeout(() => { loadAdminTab().then(() => {
+            if (getActiveTab() === 'admin') document.getElementById('tab-content').innerHTML = tabData.admin;
+          }); }, 800);
+        } else {
+          btn.textContent = "Failed";
+          showAlert('Failed to approve user');
+        }
+      } catch {
+        btn.textContent = "Failed";
+        showAlert('Network error');
+      }
+    }
+    async function declineUser(userId, btn) {
+      btn.disabled = true; btn.textContent = "Declining...";
+      try {
+        const res = await fetch(`${BASE_URL}/admin/declineUser`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId })
+        });
+        const result = await res.json();
+        if (result.success) {
+          btn.textContent = "Declined!";
+          showAlert('User declined successfully!');
+          setTimeout(() => { loadAdminTab().then(() => {
+            if (getActiveTab() === 'admin') document.getElementById('tab-content').innerHTML = tabData.admin;
+          }); }, 800);
+        } else {
+          btn.textContent = "Failed";
+          showAlert('Failed to decline user');
+        }
+      } catch {
+        btn.textContent = "Failed";
+        showAlert('Network error');
+      }
+    }
+
+    // --- Game Card ---
+    function renderGameCard(id, game, localGameIds, backendDownloads, needsUpdate = false) {
+      let status = '', btns = '', loadingState = loadingGames[id];
+      if (loadingState === "downloading") {
+        status = `<span style="color:#1976d2;">Downloading <span class="loading-spinner"></span></span>`;
+      } else if (loadingState === "unzipping") {
+        status = `<span style="color:#1976d2;">Unzipping <span class="loading-spinner"></span></span>`;
+      } else if (loadingState === "removing") {
+        status = `<span style="color:orange;">Removing <span class="loading-spinner"></span></span>`;
+      } else if (needsUpdate) {
+        status = `<span style="color:red;">Newer version available!</span>`;
+        btns = `<button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>`;
+      } else if (localGameIds.has(id) && backendDownloads.has(id)) {
+        status = '<span style="color:green;">Downloaded</span>';
+        btns = `
+          <button onclick="launchGame('${id}')">Launch</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else if (backendDownloads.has(id) && !localGameIds.has(id)) {
+        status = '<span style="color:orange;">Download not found locally.</span>';
+        btns = `
+          <button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else if (localGameIds.has(id) && !backendDownloads.has(id)) {
+        status = '<span style="color:orange;">Not in your account downloads.</span>';
+        btns = `
+          <button id="download-btn-${id}" onclick="downloadGame('${id}')">Redownload</button>
+          <button onclick="removeDownload('${id}')" id="remove-btn-${id}" style="margin-top:8px;background:#c62828;">Remove</button>
+        `;
+      } else {
+        btns = `<button id="download-btn-${id}" onclick="downloadGame('${id}')">Download</button>`;
+      }
+      return `
+        <div class="game-item" id="game-card-${id}">
+          <div class="game-name">${game?.gameName || id}</div>
+          <div class="game-system">System: ${game?.gameSystem || 'Unknown'}</div>
+          <div class="game-downloads-line">Downloads: ${downloadCounts[id] || 0}</div>
+          ${status}
+          ${btns}
+        </div>
+      `;
+    }
+
+    // --- Game Actions ---
+    async function downloadGame(gameId) {
+      loadingGames[gameId] = "downloading";
+      backendDownloads.add(gameId);
+      updateGameCard(gameId);
+      try {
+        const res = await fetch(`${BASE_URL}/api/download`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gameId })
+        });
+        if (!res.ok) throw new Error("Download failed");
+        loadingGames[gameId] = "unzipping";
+        updateGameCard(gameId);
+        const blob = await res.blob();
+        const zip = await JSZip.loadAsync(blob);
+        const files = [];
+        for (const [path, file] of Object.entries(zip.files)) {
+          if (!file.dir) {
+            const content = await file.async('blob');
+            files.push({ path: `${gameId}/${path}`, blob: content });
+          }
+        }
+        const metaKey = `${gameId}/.meta.json`;
+        const meta = { contentHash: allGames[gameId]?.contentHash || null };
+        files.push({ path: metaKey, blob: new Blob([JSON.stringify(meta)], { type: 'application/json' }) });
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readwrite');
+        const store = tx.objectStore('files');
+        for (const file of files) store.put(file);
+        await tx.done;
+        localGameIds.add(gameId);
+        try {
+          const userRes = await fetch(`${BASE_URL}/api/currentUser`, { method: 'GET', credentials: 'include' });
+          const userResult = await userRes.json();
+          backendDownloads = userResult.success ? new Set(userResult.message.downloads) : backendDownloads;
+        } catch {
+          backendDownloads.add(gameId);
+        }
+        // --- Update download counts after successful download ---
+        await fetchDownloadCounts();
+        delete loadingGames[gameId];
+        updateGameCard(gameId);
+        showAlert(`${allGames[gameId]?.gameName || gameId} downloaded successfully!`);
+      } catch {
+        delete loadingGames[gameId];
+        backendDownloads.delete(gameId);
+        updateGameCard(gameId);
+        showAlert(`${allGames[gameId]?.gameName || gameId} failed to download.`);
+      }
+    }
+    function launchGame(gameId) {
+      // Pass gameId and gameName as query params
+      const gameName = encodeURIComponent(allGames[gameId]?.gameName || gameId);
+      window.location.href = `/play?gameId=${encodeURIComponent(gameId)}&title=${gameName}`;
+    }
+    async function removeDownload(gameId) {
+      loadingGames[gameId] = "removing";
+      updateGameCard(gameId);
+      try {
+        const db = await openGameFilesDB();
+        const tx = db.transaction('files', 'readwrite');
+        const store = tx.objectStore('files');
+        const allFiles = await store.getAll();
+        for (const file of allFiles) {
+          if (file.path.startsWith(gameId + '/')) store.delete(file.path);
+        }
+        await tx.done;
+        localGameIds.delete(gameId);
+      } catch {}
+      try {
+        await fetch(`${BASE_URL}/api/removeDownload`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gameId })
+        });
+        backendDownloads.delete(gameId);
+      } catch {}
+      delete loadingGames[gameId];
+      updateGameCard(gameId);
+      showAlert(`${allGames[gameId]?.gameName || gameId} removed successfully!`);
+    }
+    function updateGameCard(gameId) {
+      const activeTab = getActiveTab();
+      const downloadsList = document.getElementById('downloads-list');
+      
+      // Check if card already exists
+      let card = document.getElementById('game-card-' + gameId);
+      
+      if (activeTab === 'downloads') {
+        const inDownloads = localGameIds.has(gameId) || backendDownloads.has(gameId) || loadingGames[gameId];
+        if (card) {
+          if (!inDownloads) {
+            // Remove the card
+            card.remove();
+            // Check if any games left, if not show "no games" message
+            if (downloadsList) {
+              const remainingCards = downloadsList.querySelectorAll('.game-item').length;
+              if (remainingCards === 0) {
+                downloadsList.innerHTML = '<p>No games found.</p>';
+              }
+            }
+          } else {
+            // Card exists and should stay, just update it
+            getLocalContentHash(gameId).then(localHash => {
+              const backendHash = allGames[gameId]?.contentHash;
+              const needsUpdate = localHash && backendHash && localHash !== backendHash;
+              if (card) card.outerHTML = renderGameCard(gameId, allGames[gameId], localGameIds, backendDownloads, needsUpdate);
+            });
+          }
+        } else if (inDownloads && downloadsList) {
+          // Card doesn't exist but should - add it
+          // First remove "No games found" message if it exists
+          const noGamesMsg = downloadsList.querySelector('p');
+          if (noGamesMsg) noGamesMsg.remove();
+          
+          getLocalContentHash(gameId).then(localHash => {
+            const backendHash = allGames[gameId]?.contentHash;
+            const needsUpdate = localHash && backendHash && localHash !== backendHash;
+            downloadsList.innerHTML += renderGameCard(gameId, allGames[gameId], localGameIds, backendDownloads, needsUpdate);
+          });
+        }
+      } else if (activeTab === 'explore') {
+        card = document.getElementById('game-card-' + gameId);
+        if (card) {
+          getLocalContentHash(gameId).then(localHash => {
+            const backendHash = allGames[gameId]?.contentHash;
+            const needsUpdate = localHash && backendHash && localHash !== backendHash;
+            if (card) card.outerHTML = renderGameCard(gameId, allGames[gameId], localGameIds, backendDownloads, needsUpdate);
+          });
+        }
+      }
+    }
+    function logout() {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (registrations) {
+          for (let registration of registrations) registration.unregister();
+        });
+      }
+      window.location.href = '/logout';
+    }
+  </script>
+
+</body>
+
+</html>

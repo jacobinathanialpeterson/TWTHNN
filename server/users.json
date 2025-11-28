@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "username": "admin",
+    "password": "scrypt:32768:8:1$LgkHqwHTUhH3XDvj$d8a0265cf63af2c4b34d4ccfdeeeb29ebbaf9efa8e8b378759d70c4e48cd639201521e46ea944c268234a817cdd5f8d0ff84eb6b65af8b7c24423ca7860f5266",
+    "displayName": "Admin",
+    "email": "twthnn.admin@gmail.com",
+    "permissions": 2,
+    "downloads": [
+      "7824",
+      "1927"
+    ]
+  },
+  {
+    "id": 2,
+    "username": "cyranicusmcneff",
+    "password": "scrypt:32768:8:1$GK9BFEI9Nl2DvxIG$180bb38d85c3f506821557cd03a030a4cfbd258041533a3850c66b1641f9f00ba934ae6309cfda13d7315724aa4cf5e2bb36a2ba93c3f419691e2423e7440747",
+    "displayName": "Cyrus Neff",
+    "email": "neffcyr000@my.jordandistrict.org",
+    "permissions": 1,
+    "downloads": []
+  }
+]

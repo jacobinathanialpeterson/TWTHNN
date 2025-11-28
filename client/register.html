@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register</title>
+    <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+    <form id="register-form">
+        <label>Email: <input type="email" name="email" required></label><br>
+        <label>Username: <input type="text" name="username" required></label><br>
+        <label>Password: <input type="password" name="password" required></label><br>
+        <label>Confirm Password: <input type="password" name="confirm_password" required></label><br>
+        <label>Display Name: <input type="text" name="display_name" required></label><br>
+        <p>Already have an account? <a href="./login">Login here</a></p>
+        <button type="submit">Register</button>
+    </form>
+
+    <div id="error-message"></div>
+
+    <script>
+        // Set your API base URL here:
+        const BASE_URL = ".";
+        document.getElementById('register-form').addEventListener('submit', async function (event) {
+            event.preventDefault();
+            const form = event.target;
+            const formData = new FormData(form);
+            const email = formData.get('email');
+            const username = formData.get('username');
+            const password = formData.get('password');
+            const confirmPassword = formData.get('confirm_password');
+            const displayName = formData.get('display_name');
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.innerText = '';
+            if (password !== confirmPassword) {
+                errorDiv.innerText = "Passwords do not match";
+                return;
+            }
+            try {
+                const response = await fetch(`${BASE_URL}/api/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        email,
+                        username,
+                        password,
+                        displayName
+                    })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    window.location.href = `${BASE_URL}/dashboard`; // Redirect to dashboard on success
+                } else {
+                    errorDiv.innerText = result.message || "Registration failed";
+                }
+            } catch (err) {
+                errorDiv.innerText = err.message || "An error occurred during registration";
+            }
+        });
+    </script>
+
+
+</body>
+
+</html>
